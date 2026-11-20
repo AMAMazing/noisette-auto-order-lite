@@ -109,11 +109,16 @@
         return 'Check Header';
     }
 
+    function isLoginPage() {
+        const path = window.location.pathname.toLowerCase();
+        return path.includes('login') || path.includes('signin');
+    }
+
     // Normalizes strings so "1.7kg" and "1.7 kg" or "6-pack" and "6 pack" match identically
     function normalizeText(str) {
         return (str || '')
             .toLowerCase()
-            .replace(/(\d+(?:\.\d+)?)\s*(kg|g|gr|ml|l|pack|pk|pcs)\b/g, '$1$2') // fuse "1.7 kg" -> "1.7kg"
+            .replace(/(\d+(?:\.\d+)?)\s*(kg|g|gr|ml|l|pack|pk|pcs)\b/g, '$1$2')
             .replace(/[^a-z0-9.]+/g, ' ')
             .trim();
     }
@@ -127,7 +132,7 @@
 
         // 1. Instant match by Noisette Item Code (data-itemno or span.item-code) if known
         if (knownCode) {
-            const codeMatch = cards.find(c => 
+            const codeMatch = cards.find(c =>
                 c.getAttribute('data-itemno') === knownCode ||
                 (c.querySelector('span.item-code')?.textContent.trim() === knownCode)
             );
@@ -137,7 +142,7 @@
         const normTarget = normalizeText(targetProductName);
         const targetTokens = normTarget.split(/\s+/).filter(Boolean);
 
-        // Words that must NOT appear unless requested (prevents picking Almond Croissant when looking for plain Croissant, or 750gr when looking for 1.7kg)
+        // Words that must NOT appear unless requested
         const negativeKeywords = ['almond', 'mini', 'chocolate', 'pain', 'ham', 'cheese', 'vegan', 'gluten', 'raw', 'unbaked', '750', 'tin'];
 
         let bestCard = null;
@@ -150,19 +155,16 @@
 
             if (!normTitle) continue;
 
-            // Exact normalized match
             if (normTitle === normTarget) {
                 return card;
             }
 
-            // Check if all target tokens exist in normalized title (or fused string)
             const fusedTitle = normTitle.replace(/\s+/g, '');
-            const allTokensPresent = targetTokens.every(token => 
+            const allTokensPresent = targetTokens.every(token =>
                 normTitle.includes(token) || fusedTitle.includes(token)
             );
             if (!allTokensPresent) continue;
 
-            // Check negative keywords
             const titleWords = normTitle.split(/\s+/);
             let penalty = 0;
             for (const neg of negativeKeywords) {
@@ -183,17 +185,60 @@
         return bestCard;
     }
 
-    // Navigate directly without triggering the heavy mobile AJAX flyout keyboard
+    // Set the card's quantity selector (.qty-wrapper) to targetQty before clicking Add to Cart
+    async function setCardQuantity(card, targetQty) {
+        const qtyInput = card.querySelector('.qty-wrapper input.qty-box, input.qty-box, input[name="quantity"]');
+        if (!qtyInput) return false;
+
+        const incBtn = card.querySelector('.qty-wrapper a.increment-qty, a.increment-qty');
+        const decBtn = card.querySelector('.qty-wrapper a.decrement-qty, a.decrement-qty');
+
+        let currentVal = parseInt(qtyInput.value, 10);
+        if (isNaN(currentVal) || currentVal < 1) currentVal = 1;
+
+        if (currentVal !== targetQty) {
+            qtyInput.style.outline = '2px solid #61afef';
+
+            if (currentVal < targetQty && incBtn) {
+                const steps = targetQty - currentVal;
+                for (let i = 0; i < steps; i++) {
+                    incBtn.click();
+                    await sleep(randomBetween(300, 550));
+                }
+            } else if (currentVal > targetQty && decBtn) {
+                const steps = currentVal - targetQty;
+                for (let i = 0; i < steps; i++) {
+                    decBtn.click();
+                    await sleep(randomBetween(300, 550));
+                }
+            }
+
+            // Fallback: if +/- didn't land on targetQty, set input value directly and notify listeners
+            if (parseInt(qtyInput.value, 10) !== targetQty) {
+                qtyInput.value = String(targetQty);
+                qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+                qtyInput.dispatchEvent(new Event('change', { bubbles: true }));
+                qtyInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                await sleep(randomBetween(300, 500));
+            }
+
+            qtyInput.style.outline = '';
+        }
+
+        return parseInt(qtyInput.value, 10) === targetQty;
+    }
+
+    // Calmer navigation pacing to look natural in server logs
     async function executeSearchNavigation(searchTerm, updateStatus) {
         updateStatus(`Searching "${searchTerm}"...`);
-        await sleep(randomBetween(1200, 2000));
+        await sleep(randomBetween(2500, 4200));
         const targetUrl = `https://connect.noisette.com.au/product_search/?q=${encodeURIComponent(searchTerm)}`;
         window.location.assign(targetUrl);
     }
 
     async function navigateToCart(updateStatus) {
         updateStatus(`Day complete! Opening Cart...`);
-        await sleep(randomBetween(1200, 2000));
+        await sleep(randomBetween(2500, 4000));
         window.location.assign('https://connect.noisette.com.au/cart');
     }
 
@@ -231,7 +276,7 @@
 
             if (this.state.isRunning && !this.aborted) {
                 // Let Vivaldi Mobile finish layout rendering before resuming
-                setTimeout(() => this.resumeAutomationLoop(), 900);
+                setTimeout(() => this.resumeAutomationLoop(), randomBetween(1200, 2000));
             }
         }
 
@@ -252,6 +297,13 @@
         }
 
         async startDayOrder(dayIdx) {
+            if (isLoginPage()) {
+                this.statusBar.style.display = 'block';
+                this.statusBar.style.color = '#ffa94d';
+                this.statusBar.textContent = '⏹ Please log in first before running an order.';
+                return;
+            }
+
             const [dayName, orderList, expectedCart] = this.steps[dayIdx];
             this.aborted = false;
 
@@ -273,6 +325,17 @@
         async resumeAutomationLoop() {
             if (this.aborted || !this.state.isRunning) return;
 
+            // Safety guard: never redirect away from a login page if session expired
+            if (isLoginPage()) {
+                await this.saveState({ isRunning: false, searchQueue: [], currentSearchGroup: null });
+                this.statusBar.style.display = 'block';
+                this.statusBar.style.color = '#ffa94d';
+                this.statusBar.textContent = '⏹ Stopped on login page. Please log in, then resume.';
+                this.setControlsEnabled(true);
+                this.resetButtonText();
+                return;
+            }
+
             this.setControlsEnabled(false);
             const [dayName] = this.steps[this.state.currentStepIdx] || ["Order"];
             this.actionBtn.textContent = `Running ${dayName}...`;
@@ -290,16 +353,14 @@
                     this.updateLiveStatus(`Looking for "${group.search}"...`);
 
                     // Poll gently for up to 5 seconds in case mobile network is still rendering ul#listing-ul
-                    let listingsReady = false;
-                    for (let i = 0; i < 5; i++) {
+                    for (let i = 0; i < 6; i++) {
                         if (document.querySelectorAll('ul#listing-ul > li.item, li.item[data-itemno]').length > 0) {
-                            listingsReady = true;
                             break;
                         }
                         await sleep(800);
                     }
 
-                    await sleep(randomBetween(800, 1400));
+                    await sleep(randomBetween(1200, 2200));
 
                     const productsToAdd = group.items
                         ? group.items
@@ -319,11 +380,10 @@
                         } catch (_) {
                             card.scrollIntoView();
                         }
-                        await sleep(randomBetween(400, 700));
+                        await sleep(randomBetween(700, 1200));
 
                         const addBtn = card.querySelector('button.add-cart-button, button.btn-cart');
                         if (!addBtn) {
-                            // Check if item says "Next available delivery date"
                             const cardTxt = card.innerText || '';
                             if (cardTxt.toLowerCase().includes('next available delivery date')) {
                                 throw new Error(`"${productName}" is unavailable for the selected delivery date!`);
@@ -331,36 +391,65 @@
                             throw new Error(`Found "${productName}", but "Add to Cart" button is missing.`);
                         }
 
-                        // Click Add to Cart `qty` times with gentle server pacing
-                        for (let c = 0; c < qty; c++) {
+                        this.updateLiveStatus(`Setting qty ${qty} for ${productName}...`);
+                        const qtySetOk = await setCardQuantity(card, qty);
+
+                        if (qtySetOk) {
+                            // Quantity selector is set -> click Add to Cart ONCE
+                            await sleep(randomBetween(450, 850));
                             if (this.aborted) throw new Error("Stopped by user.");
 
                             const prevCartCount = getLiveCartCount();
-                            this.updateLiveStatus(`Adding ${productName} (${c + 1}/${qty})...`);
+                            this.updateLiveStatus(`Adding ${qty}x ${productName}...`);
 
                             addBtn.style.outline = '3px solid #51cf66';
                             addBtn.click();
 
-                            // Wait for CommerceBuild AJAX cart counter to increment (up to 4s)
+                            // Wait for CommerceBuild AJAX cart counter to increment by qty (up to 5s)
                             let waited = 0;
-                            while (waited < 4000) {
+                            while (waited < 5000) {
                                 await sleep(500);
                                 waited += 500;
                                 const newCount = getLiveCartCount();
-                                if (newCount > prevCartCount) {
+                                if (newCount >= prevCartCount + qty) {
                                     this.refreshHeaderBadges();
                                     break;
                                 }
                             }
+                            this.refreshHeaderBadges();
 
-                            // Server-friendly pause between clicks
-                            await sleep(randomBetween(1200, 2000));
+                            await sleep(randomBetween(2200, 3800));
                             addBtn.style.outline = '';
+                        } else {
+                            // Fallback if no quantity selector exists on this card
+                            for (let c = 0; c < qty; c++) {
+                                if (this.aborted) throw new Error("Stopped by user.");
+
+                                const prevCartCount = getLiveCartCount();
+                                this.updateLiveStatus(`Adding ${productName} (${c + 1}/${qty})...`);
+
+                                addBtn.style.outline = '3px solid #51cf66';
+                                addBtn.click();
+
+                                let waited = 0;
+                                while (waited < 5000) {
+                                    await sleep(500);
+                                    waited += 500;
+                                    const newCount = getLiveCartCount();
+                                    if (newCount > prevCartCount) {
+                                        this.refreshHeaderBadges();
+                                        break;
+                                    }
+                                }
+
+                                await sleep(randomBetween(2200, 3800));
+                                addBtn.style.outline = '';
+                            }
                         }
                     }
                 }
 
-                // Proceed directly to next search (no Home screen detour)
+                // Proceed to next search
                 if (this.state.searchQueue.length > 0) {
                     const nextQueue = [...this.state.searchQueue];
                     const nextGroup = nextQueue.shift();
@@ -374,7 +463,7 @@
                     return;
                 }
 
-                // All items for the day added!
+                // All items for the day added -> pause for mandatory manual review on /cart
                 const finishedIdx = this.state.currentStepIdx;
                 const finishedExpectedCart = this.steps[finishedIdx][2];
 
@@ -572,6 +661,7 @@
             this.statusBar = this.root.querySelector('#na-status-bar');
             this.cbGroup = this.root.querySelector('#na-cb-group');
             this.cbDay = this.root.querySelector('#na-cb-day');
+            this.cbDayText = this.root.querySelector('#na-cb-day-text');
             this.cbCart = this.root.querySelector('#na-cb-cart');
             this.cbCartText = this.root.querySelector('#na-cb-cart-text');
             this.actionBtn = this.root.querySelector('#na-action-btn');
@@ -617,6 +707,27 @@
             });
         }
 
+        renderCartReviewStatus() {
+            if (!this.state.awaitingVerification || this.state.isRunning) return;
+
+            const liveCart = getLiveCartCount();
+            const expected = this.state.lastExpectedCart;
+
+            if (liveCart > 0 && liveCart !== expected) {
+                this.statusBar.style.display = 'block';
+                this.statusBar.style.color = '#ffa94d';
+                this.statusBar.textContent = `⚠️ Live cart has ${liveCart} item(s), expected ${expected}. Double-check items before submitting!`;
+            } else if (liveCart > 0 && liveCart === expected) {
+                this.statusBar.style.display = 'block';
+                this.statusBar.style.color = '#51cf66';
+                this.statusBar.textContent = `✅ Cart total (${liveCart}) matches expected amount. Review items & submit manually.`;
+            } else if (window.location.pathname.includes('/cart')) {
+                this.statusBar.style.display = 'block';
+                this.statusBar.style.color = '#a1a1aa';
+                this.statusBar.textContent = `ℹ️ Cart is empty. Select the next delivery date when ready.`;
+            }
+        }
+
         renderState() {
             this.refreshHeaderBadges();
             this.bodyContent.style.display = this.state.isMinimized ? 'none' : 'flex';
@@ -625,10 +736,12 @@
                 this.cbGroup.style.display = 'flex';
                 this.cbDay.checked = false;
                 this.cbCart.checked = false;
+                this.cbDayText.textContent = `Did you verify Friday's delivery date?`;
                 this.cbCartText.textContent = `Is Cart Amount ${this.state.lastExpectedCart}?`;
-                this.infoLabel.textContent = "✅ Friday Done! Proceed to order if everything is correct.\n\n🎉 All days have been completed!";
+                this.infoLabel.textContent = "✅ Friday Done! Manually review & submit your order.\n\n🎉 All 5 days completed!";
                 this.actionBtn.textContent = "Reset to Monday";
                 this.skipBtn.style.display = 'none';
+                this.renderCartReviewStatus();
                 return;
             }
 
@@ -636,7 +749,7 @@
             const nextDay = this.steps[this.state.currentStepIdx][0];
 
             if (!this.state.awaitingVerification && this.state.currentStepIdx === 0) {
-                this.infoLabel.textContent = "Click once you have opened connect noisette & selected Monday.";
+                this.infoLabel.textContent = "Select Monday's delivery date first, then click below to start.";
                 this.cbGroup.style.display = 'none';
                 this.actionBtn.textContent = "Run Monday";
             } else {
@@ -644,9 +757,11 @@
                 this.cbGroup.style.display = 'flex';
                 this.cbDay.checked = false;
                 this.cbCart.checked = false;
-                this.cbCartText.textContent = `Is Cart Amount ${this.state.lastExpectedCart}?`;
-                this.infoLabel.textContent = `✅ ${prevDay} Done! Proceed to order if everything is correct.\n\nClick below when you have selected ${nextDay}.`;
+                this.cbDayText.textContent = `Is ${nextDay} selected as delivery date?`;
+                this.cbCartText.textContent = `Was ${prevDay}'s cart (${this.state.lastExpectedCart}) checked & ordered?`;
+                this.infoLabel.textContent = `✅ ${prevDay} Done! Review & place your ${prevDay} order manually.\n\nThen select ${nextDay}'s date and check both boxes below.`;
                 this.actionBtn.textContent = `Run ${nextDay}`;
+                this.renderCartReviewStatus();
             }
         }
 
@@ -673,6 +788,14 @@
 
         async handleAction() {
             if (this.state.currentStepIdx >= this.steps.length) {
+                if (!this.cbDay.checked || !this.cbCart.checked) {
+                    this.actionBtn.textContent = "⚠ Check both boxes!";
+                    this.statusBar.style.display = 'block';
+                    this.statusBar.style.color = '#ffa94d';
+                    this.statusBar.textContent = '⚠ Confirm Friday review checks before resetting.';
+                    return;
+                }
+
                 await this.saveState({
                     currentStepIdx: 0,
                     awaitingVerification: false,
@@ -681,6 +804,7 @@
                     searchQueue: [],
                     currentSearchGroup: null
                 });
+                this.statusBar.style.display = 'none';
                 this.renderState();
                 return;
             }
@@ -688,6 +812,9 @@
             if (this.cbGroup.style.display !== 'none') {
                 if (!this.cbDay.checked || !this.cbCart.checked) {
                     this.actionBtn.textContent = "⚠ Check both boxes!";
+                    this.statusBar.style.display = 'block';
+                    this.statusBar.style.color = '#ffa94d';
+                    this.statusBar.textContent = '⚠ Complete both manual review checks before continuing.';
                     return;
                 }
             }
