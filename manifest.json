@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Noisette Order Automator",
+  "version": "3.0.0",
+  "description": "Lightweight, mobile-safe daily order automator for Connect Noisette.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://connect.noisette.com.au/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
